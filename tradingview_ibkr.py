@@ -9,6 +9,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, Any
+import getpass
 
 # Configure logging
 logging.basicConfig(
@@ -25,18 +26,22 @@ app = Flask(__name__)
 class IBKRTrader:
     """Handles connection and trading with Interactive Brokers"""
     
-    def __init__(self, host='127.0.0.1', port=7497, client_id=1):
+    def __init__(self, host='127.0.0.1', port=7497, client_id=1, username='', account=''):
         """
         Initialize IBKR connection
         Args:
             host: TWS/IB Gateway host
             port: 7497 for TWS paper, 7496 for TWS live, 4002 for Gateway paper, 4001 for Gateway live
             client_id: Unique client ID
+            username: IBKR username (optional, for IB Gateway)
+            account: Account number (optional)
         """
         self.ib = IB()
         self.host = host
         self.port = port
         self.client_id = client_id
+        self.username = username
+        self.account = account
         self.connected = False
         
     def connect(self):
@@ -44,6 +49,15 @@ class IBKRTrader:
         try:
             self.ib.connect(self.host, self.port, clientId=self.client_id)
             self.connected = True
+            
+            # Log account information
+            accounts = self.ib.managedAccounts()
+            if accounts:
+                logging.info(f"Available accounts: {', '.join(accounts)}")
+                if not self.account:
+                    self.account = accounts[0]
+                logging.info(f"Using account: {self.account}")
+            
             logging.info(f"Connected to IBKR at {self.host}:{self.port}")
             return True
         except Exception as e:
@@ -151,8 +165,111 @@ class IBKRTrader:
             logging.error(f"Error getting positions: {e}")
             return []
 
-# Initialize trader
-trader = IBKRTrader()
+def get_user_configuration():
+    """Interactive setup to get user configuration"""
+    print("\n" + "=" * 60)
+    print("IBKR CONFIGURATION SETUP")
+    print("=" * 60)
+    
+    # Account Type
+    print("\nSelect Account Type:")
+    print("1. Paper Trading (recommended for testing)")
+    print("2. Live Trading")
+    
+    while True:
+        account_choice = input("\nEnter choice (1 or 2): ").strip()
+        if account_choice in ['1', '2']:
+            break
+        print("Invalid choice. Please enter 1 or 2.")
+    
+    is_paper = (account_choice == '1')
+    
+    # Platform Type
+    print("\nSelect Platform:")
+    print("1. TWS (Trader Workstation)")
+    print("2. IB Gateway")
+    
+    while True:
+        platform_choice = input("\nEnter choice (1 or 2): ").strip()
+        if platform_choice in ['1', '2']:
+            break
+        print("Invalid choice. Please enter 1 or 2.")
+    
+    is_tws = (platform_choice == '1')
+    
+    # Determine port based on selections
+    if is_tws:
+        port = 7497 if is_paper else 7496
+        platform_name = "TWS"
+    else:
+        port = 4002 if is_paper else 4001
+        platform_name = "IB Gateway"
+    
+    account_type = "Paper Trading" if is_paper else "Live Trading"
+    
+    # Host configuration
+    print("\nConnection Host:")
+    host = input("Enter host (press Enter for localhost/127.0.0.1): ").strip()
+    if not host:
+        host = '127.0.0.1'
+    
+    # Client ID
+    print("\nClient ID:")
+    client_id_input = input("Enter client ID (press Enter for default: 1): ").strip()
+    client_id = int(client_id_input) if client_id_input else 1
+    
+    # Username (optional, mainly for IB Gateway)
+    print("\nIBKR Credentials (optional for TWS, required for some IB Gateway setups):")
+    username = input("Enter IBKR username (press Enter to skip): ").strip()
+    
+    # Password (optional)
+    password = ""
+    if username:
+        password = getpass.getpass("Enter IBKR password (hidden): ").strip()
+    
+    # Account number (optional)
+    account = input("\nEnter account number (press Enter to auto-detect): ").strip()
+    
+    # Secret key for webhook
+    print("\nWebhook Security:")
+    print("This secret key must match the one in your TradingView alerts")
+    secret_key = input("Enter secret key (press Enter for default 'your_secret_key_here'): ").strip()
+    if not secret_key:
+        secret_key = 'your_secret_key_here'
+    
+    # Summary
+    print("\n" + "=" * 60)
+    print("CONFIGURATION SUMMARY")
+    print("=" * 60)
+    print(f"Account Type:  {account_type}")
+    print(f"Platform:      {platform_name}")
+    print(f"Host:          {host}")
+    print(f"Port:          {port}")
+    print(f"Client ID:     {client_id}")
+    print(f"Username:      {username if username else 'Not provided'}")
+    print(f"Account:       {account if account else 'Auto-detect'}")
+    print(f"Secret Key:    {'*' * len(secret_key)}")
+    print("=" * 60)
+    
+    confirm = input("\nProceed with this configuration? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("Configuration cancelled. Exiting...")
+        exit(0)
+    
+    return {
+        'host': host,
+        'port': port,
+        'client_id': client_id,
+        'username': username,
+        'password': password,
+        'account': account,
+        'secret_key': secret_key,
+        'is_paper': is_paper,
+        'platform': platform_name
+    }
+
+# Initialize trader (will be configured in main)
+trader = None
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -169,6 +286,11 @@ def webhook():
         "secret": "your_secret_key"
     }
     """
+    trader = app.config.get('TRADER')
+    
+    if trader is None:
+        return jsonify({'status': 'error', 'message': 'Trader not initialized'}), 500
+    
     try:
         # Get JSON data
         data = request.get_json()
@@ -180,7 +302,7 @@ def webhook():
         
         # Verify secret (optional security measure)
         secret = data.get('secret', '')
-        expected_secret = 'your_secret_key_here'  # Change this!
+        expected_secret = app.config.get('SECRET_KEY', 'your_secret_key_here')
         
         if secret != expected_secret:
             logging.warning("Invalid secret key")
@@ -224,6 +346,11 @@ def webhook():
 @app.route('/positions', methods=['GET'])
 def positions():
     """Get current positions"""
+    trader = app.config.get('TRADER')
+    
+    if trader is None:
+        return jsonify({'status': 'error', 'message': 'Trader not initialized'}), 500
+    
     try:
         pos = trader.get_positions()
         return jsonify({'status': 'success', 'positions': pos}), 200
@@ -233,59 +360,70 @@ def positions():
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
+    trader = app.config.get('TRADER')
+    
+    connected = trader.connected if trader is not None else False
+    
     return jsonify({
         'status': 'ok',
-        'connected': trader.connected,
+        'connected': connected,
         'timestamp': datetime.now().isoformat()
     }), 200
 
 if __name__ == '__main__':
     """
-    SETUP INSTRUCTIONS:
-    
-    1. Install required packages:
-       pip install flask ib_insync
-    
-    2. Install and run TWS or IB Gateway:
-       - Download from IBKR website
-       - Enable API connections in settings
-       - Set Socket Port (7497 for paper trading)
-    
-    3. Configure TradingView Alert:
-       - Create alert in TradingView
-       - Set Webhook URL to: http://your-server:5000/webhook
-       - Message format (JSON):
-         {
-           "symbol": "{{ticker}}",
-           "action": "buy",
-           "quantity": 100,
-           "order_type": "market",
-           "secret": "your_secret_key_here"
-         }
-    
-    4. Run this script:
-       python tradingview_ibkr.py
-    
-    5. For production, use a proper WSGI server like gunicorn:
-       gunicorn -w 4 -b 0.0.0.0:5000 tradingview_ibkr:app
+    TradingView to IBKR Automated Trading System
+    Interactive setup for secure configuration
     """
     
-    print("=" * 60)
+    print("\n" + "=" * 60)
     print("TradingView to IBKR Trading System")
     print("=" * 60)
-    print(f"Starting server at http://0.0.0.0:5000")
+    print("\nBefore starting, make sure:")
+    print("1. TWS or IB Gateway is running")
+    print("2. API connections are enabled in TWS/Gateway settings")
+    print("3. Socket port is configured correctly")
+    print("\n" + "=" * 60)
+    
+    # Get user configuration
+    config = get_user_configuration()
+    
+    # Store secret key in app config
+    app.config['SECRET_KEY'] = config['secret_key']
+    
+    # Initialize trader with user configuration
+    trader = IBKRTrader(
+        host=config['host'],
+        port=config['port'],
+        client_id=config['client_id'],
+        username=config['username'],
+        account=config['account']
+    )
+    
+    # Make trader accessible to Flask routes
+    app.config['TRADER'] = trader
+    
+    print("\n" + "=" * 60)
+    print("STARTING SERVER")
+    print("=" * 60)
+    print(f"Server URL: http://0.0.0.0:5000")
     print(f"Webhook endpoint: http://0.0.0.0:5000/webhook")
     print(f"Health check: http://0.0.0.0:5000/health")
     print(f"Positions: http://0.0.0.0:5000/positions")
     print("=" * 60)
     
-    # Try to connect to IBKR on startup (non-blocking)
-    print("\nAttempting to connect to IBKR...")
+    # Try to connect to IBKR on startup
+    print(f"\nAttempting to connect to IBKR...")
+    print(f"Platform: {config['platform']}")
+    print(f"Account Type: {'Paper Trading' if config['is_paper'] else 'Live Trading'}")
+    print(f"Connecting to {config['host']}:{config['port']}...\n")
+    
     if trader.connect():
         print("✓ Successfully connected to IBKR")
+        print(f"✓ Account: {trader.account}")
     else:
         print("✗ Could not connect to IBKR")
-        print("  Make sure TWS or IB Gateway is running")
+        print(f"  Make sure {config['platform']} is running on port {config['port']}")
         print("  The server will still start and retry connections on each trade")
     
     print("\n" + "=" * 60)
@@ -299,5 +437,6 @@ if __name__ == '__main__':
         print("\n\nShutting down...")
     finally:
         # Disconnect on shutdown
-        trader.disconnect()
+        if trader:
+            trader.disconnect()
         print("Server stopped.")
