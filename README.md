@@ -24,7 +24,7 @@ A Python-based automated trading system that receives webhook alerts from Tradin
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/tradingview-ibkr-automation.git
+git clone https://github.com/Shifrozy/tradingview-ibkr-automation.git
 cd tradingview-ibkr-automation
 ```
 
